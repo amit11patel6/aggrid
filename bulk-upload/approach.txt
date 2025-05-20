@@ -1,0 +1,142 @@
+1. File Upload & Job Initialization
+API Endpoint
+
+POST /bulk‑update accepts MultipartFile CSV.
+
+Immediately generate a Job ID (UUID or sequence), record in job_status (status=PENDING), and return HTTP 202 with { jobId }.
+
+Async Processing
+
+Use Spring’s @Async backed by a tuned ThreadPoolTaskExecutor (set core/max threads and queue size) to avoid JVM OOM.
+
+2. Create & Load Temporary Table
+UNLOGGED Temporary Table
+
+sql
+Copy
+Edit
+CREATE UNLOGGED TEMP TABLE temp_upload (
+  csv_id      SERIAL PRIMARY KEY,
+  pk_col      BIGINT,
+  col1        TEXT,
+  col2        TEXT,
+  /* … all 40 updatable columns … */,
+  line_number INTEGER
+);
+- Why UNLOGGED? Faster writes, no WAL, but no crash recovery needed for temp data.
+
+COPY Direct from HTTP Stream
+
+java
+Copy
+Edit
+CopyManager copyManager = new CopyManager((BaseConnection) dataSource.getConnection());
+copyManager.copyIn(
+  "COPY temp_upload(pk_col, col1, …, line_number) FROM STDIN WITH (FORMAT csv, HEADER)",
+  request.getInputStream()
+);
+Streams directly, avoids buffering entire CSV in memory.
+
+3. Batch Validation (SQL‑Only)
+Loop 15 complex columns and for each:
+
+Extract Distinct Values
+
+sql
+Copy
+Edit
+CREATE TEMP TABLE vals_col1 AS
+  SELECT DISTINCT col1 FROM temp_upload;
+Validate via Indexed Join
+
+sql
+Copy
+Edit
+-- ensure an index exists on reference_table.name
+SELECT t.line_number, t.col1
+FROM vals_col1 v
+LEFT JOIN reference_table r
+  ON LOWER(TRIM(v.col1)) = LOWER(TRIM(r.name))
+JOIN temp_upload t USING (col1)
+WHERE r.id IS NULL;
+Collect Errors
+Insert into job_errors(job_id, line_number, column_name, invalid_value, error_msg).
+
+4. Error Handling & Thresholds
+Error Threshold: allow up to N errors (configurable); above that, fail the job.
+
+On any errors (or exceeding threshold):
+
+Update job_status → FAILED.
+
+Record error_count.
+
+Expose GET /bulk‑update/{jobId}/errors for the UI to fetch detailed rows.
+
+5. Chunked Bulk Update
+Determine Chunk Size (e.g., 2,000 rows) to limit MVCC bloat & locks.
+
+Batch Loop:
+
+sql
+Copy
+Edit
+-- Example for chunk where csv_id BETWEEN :start AND :end
+UPDATE main_table m
+SET
+  col1 = t.col1,
+  col2 = t.col2,
+  /* … only non-null CSV columns … */
+FROM temp_upload t
+WHERE m.pk_col = t.pk_col
+  AND t.csv_id BETWEEN :start AND :end;
+Commit Each Chunk to keep transactions short and avoid VACUUM bloat.
+
+6. Schema Drift Guard
+At Job Start:
+
+Query information_schema.columns for your main table.
+
+Verify CSV header exactly matches the 40 allowed column names (whitelist).
+
+Fail fast if mismatch, with clear “schema drift” error.
+
+7. Audit Trail & Change Tracking
+Option A: Use a history table:
+
+sql
+Copy
+Edit
+INSERT INTO main_table_history (pk_col, changed_at, changed_by, old_values, new_values)
+SELECT m.pk_col, NOW(), :user, row_to_json(m), row_to_json(t)
+FROM main_table m
+JOIN temp_upload t ON m.pk_col = t.pk_col
+WHERE /* chunk filter */;
+Option B: JSONB column in main_table to store diffs.
+
+8. Finalize Job
+If all chunks succeed:
+
+Update job_status → COMPLETED, record completed_at.
+
+If any chunk fails mid‑way:
+
+Update job_status → FAILED, record partial progress and errors.
+
+9. Security & Injection Prevention
+Whitelist Columns: Hard‑code the 40 allowed columns; reject any others.
+
+Parameterized SQL: Never concatenate user input into queries.
+
+Roles & Permissions: Ensure only authorized users can invoke bulk updates.
+
+🚀 Why This Works
+High Throughput via COPY + set‑based SQL.
+
+Low Contention by chunked updates & UNLOGGED temp tables.
+
+Robustness with schema checks, error thresholds, and audit trails.
+
+Scalability by parallelizing validation and tuning thread pools.
+
+This final approach balances speed, safety, and maintainability—ready for production. Let me know if you’d like code samples for any part of this flow!
