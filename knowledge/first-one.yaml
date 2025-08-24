@@ -1,0 +1,708 @@
+Love this idea — yes, it can work, and it can be *really* good if we treat your `.md` files as a tiny, declarative **workflow DSL** that the agent can execute safely and repeatably. Below I’ll (1) fill gaps, (2) propose an opinionated folder/DSL design, (3) add guardrails + resume-ability, and (4) give you ready-to-use `.md` templates for all four catalog items.
+
+---
+
+# 🚧 The Missing Pieces (and how to solve them)
+
+1. **A tiny DSL in Markdown**
+   Plain prose isn’t enough. Add a minimal, machine-parsable structure (YAML front-matter + fenced code blocks) so the agent can: ask questions, branch, run tools (git/grep/generate), and verify checkpoints.
+
+2. **State & resume**
+   Persist a `run-state.json` per workflow with captured answers, derived variables, checkpoints passed, and artifacts created. This enables pause/resume, replays, and auditability.
+
+3. **Guardrails & permissions**
+   An “allowlist” of actions per step (e.g., `git.clone`, `fs.write`, `code.gen`) and **dry-run** mode that shows a plan/diff before writes. All changes land in a branch and a PR.
+
+4. **Extractors with standard outputs**
+   Extraction must produce a *stable schema* (e.g., `/docs/business-knowledge/index.md`, `entities.yaml`, `apis.yaml`). Later steps consume this schema — not ad-hoc text blobs.
+
+5. **Mappings & linters**
+   Keep `maps/` for .NET→Spring equivalences, and `linters/` for best practices checks. The agent cross-references both before generating code.
+
+6. **Company “packs”**
+   Ship *pluggable* knowledge packs (e.g., `packs/moneta-boot/`) for SSO, CI/CD, docker, pipelines. Workflows can `include:` these packs at runtime.
+
+7. **Idempotence & checkpoints**
+   Each step has `success_when:` conditions the agent can verify (files exist, tests pass, APIs discovered ≥ N). The engine retries/repairs safely.
+
+8. **Artifacts & transparency**
+   Every step must write a human-readable log in `/artifacts/<workflow-id>/` and generate a consolidated **Plan.md** for approval.
+
+---
+
+# 🗂️ Opinionated Repository Layout
+
+```
+memory-bank/
+  catalog.md
+  engine/
+    toolbox.md                # what the agent is allowed to do (APIs/tools)
+    policies.md               # safety, rate limits, path allowlist
+    templates/                # PR titles, commit messages, readmes
+  maps/
+    dotnet-to-spring.yaml     # package/class/pattern equivalences
+    angular-to-react.yaml
+  linters/
+    spring-boot-best-practices.md
+    react-best-practices.md
+  packs/
+    moneta-boot/
+      readme.md
+      sso-okta.md
+      cicd-jules.md
+      docker-multistage.md
+      postgres-jpa.md
+  workflows/
+    dotnet-to-springboot/
+      workflow.md
+      extractors.md
+      validators.md
+    springboot-new/
+      workflow.md
+    angular-to-react/
+      workflow.md
+      codemods.md
+    react-mui-new/
+      workflow.md
+```
+
+> Keep “memory bank” outside the workspace if you like; the agent reads from that path and writes only inside the workspace/sandbox (except cloning).
+
+---
+
+# 🧩 The Mini DSL (in Markdown)
+
+**What the agent reads in each `workflow.md`:**
+
+* **YAML front-matter**: name, version, inputs, includes (packs), capabilities.
+* **Steps**: a sequence of machine-parsable blocks, each with:
+
+  * `ask:` questions (to populate inputs).
+  * `use:` tools from `engine/toolbox.md` (e.g., `git.clone`, `fs.scan`, `code.search`, `llm.summarize`, `spring.init`).
+  * `vars:` computed variables.
+  * `success_when:` verifiable checks.
+  * `on_success:`/`on_failure:` branching.
+
+### Step schema (put this at top of each workflow)
+
+````markdown
+```workflow-schema
+step:
+  id: string
+  title: string
+  ask?:               # questions to user → saved to run-state
+    - id: string
+      prompt: string
+      type: select|text|path|bool|multi
+      options?: [..]
+      save_as: string
+      required: bool
+  use?:               # allowed tools this step can call
+    - tool: string    # e.g., git.clone | fs.copy | code.search | spring.init
+      with: object    # params with {{vars}} interpolation
+  vars?:              # derived variables from prior inputs
+    name: "{{ expression }}"
+  success_when?:      # verifiable conditions
+    - kind: exists|matches|count|command_succeeds
+      target: "path-or-glob-or-metric"
+      expect: "value or regex"
+  on_success?: goto|finish
+  on_failure?: goto|ask_for_help|abort
+````
+
+````
+
+---
+
+# 📚 `catalog.md` (top-level menu)
+
+```markdown
+# 📚 Memory Bank — Catalog
+
+Pick a workflow:
+
+1. [.NET → Spring Boot](workflows/dotnet-to-springboot/workflow.md)
+2. [New Spring Boot App](workflows/springboot-new/workflow.md)
+3. [Angular → React](workflows/angular-to-react/workflow.md)
+4. [New React + Material UI](workflows/react-mui-new/workflow.md)
+
+> Say: **"load memory bank"** to see this menu anytime.
+````
+
+---
+
+# 🧠 Toolbox (what the agent is allowed to do)
+
+Keep it explicit — the agent can only call these:
+
+```markdown
+# engine/toolbox.md
+
+## Tools
+- git.clone(repo, dest)
+- git.branch(name), git.commit(msg), git.create_pr(title, body)
+- fs.scan(path, globs), fs.copy(src, dst), fs.write(path, content), fs.diff(path)
+- code.search(path, pattern), code.parse_dotnet(path), code.parse_java(path)
+- llm.summarize(text, style), llm.transform(mapping, input)
+- spring.init(name, groupId, artifactId, template), spring.add_dependency(pom.xml, dependency)
+- docker.writefile(path, template), cicd.apply(template, params)
+- test.run(mvn or gradle), react.init(name), react.add_mui(), angular.parse(), codemod.apply(set)
+
+## Conventions
+- All file writes require `dry_run: true` until the plan is approved.
+- All code writes go to a new branch `feat/{{workflowId}}`.
+```
+
+---
+
+# ✅ Example: **.NET → Spring Boot** (`workflows/dotnet-to-springboot/workflow.md`)
+
+````markdown
+---
+name: ".NET to Spring Boot Conversion"
+version: 1.0.0
+includes:
+  - ../..//packs/moneta-boot/sso-okta.md
+  - ../..//packs/moneta-boot/cicd-jules.md
+  - ../..//packs/moneta-boot/docker-multistage.md
+inputs:
+  - repoLocation
+  - targetMode          # "new" | "integrate"
+  - existingSpringPath  # required if integrate
+policies:
+  dry_run_default: true
+  write_paths_allowlist:
+    - "workspace/**"
+    - "!workspace/**/node_modules/**"
+---
+
+## step:welcome
+```step
+id: welcome
+title: "Welcome"
+ask:
+  - id: src_where
+    prompt: "Where is your .NET source?"
+    type: select
+    options: ["workspace", "git", "bitbucket", "local_path"]
+    save_as: repo.kind
+    required: true
+  - id: src_path
+    prompt: "If local/workspace, provide path. If git/bitbucket, provide clone URL."
+    type: text
+    save_as: repo.location
+    required: true
+on_success: goto:ingest
+````
+
+## step\:ingest
+
+```step
+id: ingest
+title: "Ingest code into workspace"
+vars:
+  target_dir: "workspace/dotnet-src"
+use:
+  - tool: git.clone
+    with: { repo: "{{repo.location}}", dest: "{{target_dir}}" }
+    when: "{{repo.kind in ['git','bitbucket']}}"
+  - tool: fs.copy
+    with: { src: "{{repo.location}}", dst: "{{target_dir}}" }
+    when: "{{repo.kind in ['local_path','workspace']}}"
+success_when:
+  - kind: exists
+    target: "{{target_dir}}/**/*.sln"
+    expect: "present"
+on_success: goto:extract_business_knowledge
+```
+
+## step\:extract\_business\_knowledge
+
+```step
+id: extract_business_knowledge
+title: "Extract business knowledge from .NET"
+use:
+  - tool: code.parse_dotnet
+    with: { path: "{{target_dir}}" }
+  - tool: llm.summarize
+    with:
+      text: "{{OUTPUT(code.parse_dotnet)}}"
+      style: "business-knowledge"
+  - tool: fs.write
+    with:
+      path: "{{target_dir}}/docs/business-knowledge/index.md"
+      content: "{{OUTPUT(llm.summarize)}}"
+success_when:
+  - kind: exists
+    target: "{{target_dir}}/docs/business-knowledge/index.md"
+    expect: "present"
+on_success: goto:mapping_gap_analysis
+```
+
+## step\:mapping\_gap\_analysis
+
+```step
+id: mapping_gap_analysis
+title: "NuGet → Maven equivalence check"
+use:
+  - tool: code.search
+    with: { path: "{{target_dir}}", pattern: "PackageReference Include=\"(.*)\"" }
+  - tool: llm.transform
+    with:
+      mapping: "maps/dotnet-to-spring.yaml"
+      input: "{{OUTPUT(code.search)}}"
+  - tool: fs.write
+    with:
+      path: "{{target_dir}}/docs/business-knowledge/dependency-map.md"
+      content: "{{OUTPUT(llm.transform)}}"
+success_when:
+  - kind: matches
+    target: "{{target_dir}}/docs/business-knowledge/dependency-map.md"
+    expect: ".*Equivalents.*"
+on_success: goto:choose_target_project
+```
+
+## step\:choose\_target\_project
+
+```step
+id: choose_target_project
+title: "Choose target Spring Boot project mode"
+ask:
+  - id: mode
+    prompt: "Create new Spring Boot project or integrate into existing?"
+    type: select
+    options: ["new", "integrate"]
+    save_as: target.mode
+    required: true
+  - id: existing_path
+    prompt: "If integrate, provide existing Spring Boot path"
+    type: path
+    save_as: target.path
+    required: false
+on_success: goto:scaffold_or_attach
+```
+
+## step\:scaffold\_or\_attach
+
+```step
+id: scaffold_or_attach
+title: "Initialize target"
+vars:
+  spring_root: "{{ target.mode == 'new' ? 'workspace/spring-target' : target.path }}"
+use:
+  - tool: spring.init
+    when: "{{target.mode == 'new'}}"
+    with: { name: "ConvertedService", groupId: "com.company", artifactId: "converted-service", template: "moneta-boot" }
+  - tool: fs.scan
+    with: { path: "{{spring_root}}", globs: ["pom.xml", "build.gradle"] }
+success_when:
+  - kind: exists
+    target: "{{spring_root}}/pom.xml"
+    expect: "present"
+on_success: goto:plan_generation
+```
+
+## step\:plan\_generation
+
+```step
+id: plan_generation
+title: "Generate conversion plan"
+use:
+  - tool: llm.summarize
+    with:
+      text: |
+        {{FILE(target_dir + '/docs/business-knowledge/index.md')}}
+        {{FILE(target_dir + '/docs/business-knowledge/dependency-map.md')}}
+      style: "conversion-plan"
+  - tool: fs.write
+    with:
+      path: "{{spring_root}}/docs/ConversionPlan.md"
+      content: "{{OUTPUT(llm.summarize)}}"
+success_when:
+  - kind: exists
+    target: "{{spring_root}}/docs/ConversionPlan.md"
+    expect: "present"
+on_success: goto:user_approval
+```
+
+## step\:user\_approval
+
+```step
+id: user_approval
+title: "Show plan & request approval"
+ask:
+  - id: approve
+    prompt: "Approve the conversion plan? (Yes/No)"
+    type: select
+    options: ["Yes", "No"]
+    save_as: approval.ok
+    required: true
+on_success: "{{ approval.ok == 'Yes' ? 'goto:convert_code' : 'goto:abort' }}"
+```
+
+## step\:convert\_code
+
+```step
+id: convert_code
+title: "Convert: entities, repos, services, controllers"
+use:
+  - tool: llm.transform
+    with:
+      mapping: "maps/dotnet-to-spring.yaml"
+      input: "{{FILE(target_dir + '/**/*.cs')}}"
+  - tool: fs.write
+    with:
+      path: "{{spring_root}}/src/main/java/**"
+      content: "{{OUTPUT(llm.transform)}}"
+  - tool: spring.add_dependency
+    with: { pom.xml: "{{spring_root}}/pom.xml", dependency: ["web","data-jpa","security","postgresql"] }
+  - tool: docker.writefile
+    with: { path: "{{spring_root}}/Dockerfile", template: "packs/moneta-boot/docker-multistage.md" }
+  - tool: cicd.apply
+    with: { template: "packs/moneta-boot/cicd-jules.md", params: { service: "converted-service" } }
+success_when:
+  - kind: command_succeeds
+    target: "mvn -f {{spring_root}}/pom.xml -q -DskipTests package"
+    expect: "exitCode:0"
+on_success: goto:lint_and_tests
+```
+
+## step\:lint\_and\_tests
+
+```step
+id: lint_and_tests
+title: "Best-practices lint + tests"
+use:
+  - tool: llm.summarize
+    with:
+      text: "{{FILE('linters/spring-boot-best-practices.md')}}"
+      style: "lint-rules"
+  - tool: test.run
+    with: { cmd: "mvn -f {{spring_root}}/pom.xml -q test" }
+success_when:
+  - kind: command_succeeds
+    target: "mvn -f {{spring_root}}/pom.xml -q test"
+    expect: "exitCode:0"
+on_success: goto:create_pr
+```
+
+## step\:create\_pr
+
+```step
+id: create_pr
+title: "Create PR"
+use:
+  - tool: git.branch
+    with: { name: "feat/{{RUN_ID}}" }
+  - tool: git.commit
+    with: { msg: "chore(conversion): .NET→Spring Boot via Memory Bank workflow" }
+  - tool: git.create_pr
+    with: { title: "Convert .NET → Spring Boot", body: "{{FILE(spring_root + '/docs/ConversionPlan.md')}}" }
+success_when:
+  - kind: matches
+    target: "PR_CREATED"
+    expect: ".*https?://.*"
+on_success: finish
+```
+
+````
+
+---
+
+# 🧪 Standardized Extractors (referenced by the workflow)
+
+`workflows/dotnet-to-springboot/extractors.md` defines **what** gets extracted and **where** it’s written:
+
+```markdown
+# Extractors
+
+- Controllers → `docs/business-knowledge/apis.yaml` (paths, verbs, DTOs)
+- Services → `docs/business-knowledge/services.md` (use-cases, invariants)
+- Entities → `docs/business-knowledge/entities.yaml` (fields, relations)
+- Config → `docs/business-knowledge/config.md` (connection strings, feature flags)
+````
+
+Now later steps can consume `apis.yaml` and `entities.yaml` deterministically.
+
+---
+
+# 🧭 Mappings (NuGet→Maven, idioms→idioms)
+
+`maps/dotnet-to-spring.yaml` (tiny sample):
+
+```yaml
+packages:
+  "Microsoft.AspNetCore.App": ["spring-boot-starter-web"]
+  "Microsoft.Extensions.Logging": ["spring-boot-starter-logging"]
+  "Swashbuckle.AspNetCore": ["springdoc-openapi-starter-webmvc-ui"]
+
+idioms:
+  controller_attribute:
+    from: "[ApiController]"
+    to: "@RestController"
+  route_attribute:
+    from: "[Route(\"/api/{name}\")]"
+    to: "@RequestMapping(\"/api/{name}\")"
+
+data_access:
+  orm_from: "EntityFramework"
+  orm_to: "JPA/Hibernate"
+  repo_pattern: "Spring Data JPA"
+```
+
+---
+
+# 🔐 Guardrails & Policies
+
+* **Dry-run by default** → Only write after **Plan approval**.
+* **Path allowlist** → Prevents writing outside workspace/sandbox.
+* **Rate limits** and **tool timeouts** to avoid runaway loops.
+* **Secret scanning** on any cloned repo before logs/artifacts are saved.
+* **License check** if code is public.
+
+---
+
+# 🔄 Engine Behavior (pseudo)
+
+1. Parse `workflow.md` → steps array.
+2. Load/merge `includes:` packs.
+3. Load `run-state.json` (or init).
+4. Execute step:
+
+   * Ask questions → save answers.
+   * Compute `vars` (template interpolation).
+   * Enforce toolbox allowlist; call tools with parameters.
+   * Evaluate `success_when`; set checkpoint.
+   * Branch `on_success`/`on_failure`.
+5. Persist logs + artifacts each step.
+6. Stop on `finish`, `abort`, or user cancel.
+
+---
+
+# ✨ Out-of-the-box boosters
+
+* **Automated Gap Analysis** (you already proposed): extend to *architectural* gaps (e.g., background jobs, schedulers, caches).
+* **Mermaid dependency graph** of original solution + proposed Spring modules.
+* **Change Impact Matrix**: for each .NET endpoint, show generated Java files and tests that cover it.
+* **Self-lint** against `linters/spring-boot-best-practices.md` and surface fix-its before PR.
+* **SBOM + SCA**: generate SBOM and run dependency scan; attach results to PR.
+* **Plan Costing**: rough effort estimate (#files, complexity buckets, test count).
+* **Drift guard**: if source repo changes mid-run, prompt to rebase the plan.
+* **Multi-repo discovery**: find related repos via shared package ids and suggest inclusion.
+
+---
+
+# 🧰 Three Other Workflows (concise templates)
+
+## 1) **New Spring Boot app** (`workflows/springboot-new/workflow.md`)
+
+````markdown
+---
+name: "New Spring Boot Service"
+version: 1.0.0
+includes:
+  - ../..//packs/moneta-boot/docker-multistage.md
+  - ../..//packs/moneta-boot/cicd-jules.md
+inputs: [serviceName, groupId, database, sso]
+---
+
+## step:init
+```step
+id: init
+title: "Initialize project"
+ask:
+  - id: name
+    prompt: "Service name?"
+    type: text
+    save_as: svc
+    required: true
+use:
+  - tool: spring.init
+    with: { name: "{{svc}}", groupId: "com.company", artifactId: "{{svc}}", template: "moneta-boot" }
+success_when:
+  - kind: exists
+    target: "workspace/{{svc}}/pom.xml"
+    expect: "present"
+on_success: goto:config
+````
+
+## step\:config
+
+```step
+id: config
+title: "Add dependencies & packs"
+ask:
+  - id: db
+    prompt: "Database?"
+    type: select
+    options: ["postgres", "mysql", "none"]
+    save_as: database
+  - id: sso
+    prompt: "Enable SSO (Okta/OAuth2)?"
+    type: select
+    options: ["yes","no"]
+    save_as: sso
+use:
+  - tool: spring.add_dependency
+    with: { pom.xml: "workspace/{{svc}}/pom.xml", dependency: ["web"] }
+  - tool: spring.add_dependency
+    when: "{{database != 'none'}}"
+    with: { pom.xml: "workspace/{{svc}}/pom.xml", dependency: ["data-jpa","{{database}}"] }
+  - tool: docker.writefile
+    with: { path: "workspace/{{svc}}/Dockerfile", template: "packs/moneta-boot/docker-multistage.md" }
+  - tool: cicd.apply
+    with: { template: "packs/moneta-boot/cicd-jules.md", params: { service: "{{svc}}" } }
+on_success: finish
+```
+
+````
+
+## 2) **Angular → React** (`workflows/angular-to-react/workflow.md`)
+
+```markdown
+---
+name: "Angular to React Migration"
+version: 1.0.0
+includes:
+  - ../..//linters/react-best-practices.md
+inputs: [repoLocation, uiLibrary, routing]
+---
+
+## step:ingest
+```step
+id: ingest
+title: "Clone/Copy Angular app"
+ask:
+  - id: src
+    prompt: "Angular app location (path or git URL)?"
+    type: text
+    save_as: repo
+use:
+  - tool: git.clone
+    when: "{{repo startswith 'http'}}"
+    with: { repo: "{{repo}}", dest: "workspace/ng-src" }
+  - tool: fs.copy
+    when: "{{!(repo startswith 'http')}}"
+    with: { src: "{{repo}}", dst: "workspace/ng-src" }
+success_when:
+  - kind: exists
+    target: "workspace/ng-src/angular.json"
+    expect: "present"
+on_success: goto:analyze
+````
+
+## step\:analyze
+
+```step
+id: analyze
+title: "Analyze routes/components/services"
+use:
+  - tool: angular.parse
+    with: { path: "workspace/ng-src" }
+  - tool: fs.write
+    with:
+      path: "workspace/ng-src/docs/structure.md"
+      content: "{{OUTPUT(angular.parse)}}"
+on_success: goto:react_scaffold
+```
+
+## step\:react\_scaffold
+
+```step
+id: react_scaffold
+title: "Scaffold React app"
+ask:
+  - id: lib
+    prompt: "UI library? (MUI/Chakra/None)"
+    type: select
+    options: ["mui","chakra","none"]
+    save_as: ui
+use:
+  - tool: react.init
+    with: { name: "react-target" }
+  - tool: react.add_mui
+    when: "{{ui == 'mui'}}"
+success_when:
+  - kind: exists
+    target: "workspace/react-target/package.json"
+    expect: "present"
+on_success: goto:codemod
+```
+
+## step\:codemod
+
+```step
+id: codemod
+title: "Apply codemods for templates/services/routing"
+use:
+  - tool: codemod.apply
+    with: { set: "workflows/angular-to-react/codemods.md", src: "workspace/ng-src", dst: "workspace/react-target" }
+success_when:
+  - kind: count
+    target: "workspace/react-target/src/**/*.tsx"
+    expect: ">= 5"
+on_success: finish
+```
+
+````
+
+## 3) **New React + MUI** (`workflows/react-mui-new/workflow.md`)
+
+```markdown
+---
+name: "New React + Material UI"
+version: 1.0.0
+inputs: [appName, router, state]
+---
+
+## step:init
+```step
+id: init
+title: "Initialize React + MUI"
+ask:
+  - id: name
+    prompt: "App name?"
+    type: text
+    save_as: app
+use:
+  - tool: react.init
+    with: { name: "{{app}}" }
+  - tool: react.add_mui
+success_when:
+  - kind: exists
+    target: "workspace/{{app}}/src/App.tsx"
+    expect: "present"
+on_success: finish
+````
+
+```
+
+---
+
+# 🧪 Validation & Quality Gates
+
+- **Pre-flight**: disk space, repo access, Java/JDK/Node versions.
+- **Mid-flight**: compile app after major generation steps.
+- **End-flight**: tests pass, linters pass, Dockerfile builds locally, PR ready.
+
+---
+
+# 📝 What the user sees (UX snippets)
+
+- “Welcome… here are the top-level options” → from `catalog.md`.
+- Step UIs are generated from each step’s `ask:` schema.
+- **Plan view** (before writes): renders `ConversionPlan.md` with a summary of diffs the agent intends to produce.
+- **Resume**: “I see a partial run exists. Continue from step: *lint_and_tests*?”
+
+---
+
+# 🎯 Bottom line
+
+Yes — your Memory Bank design will work **reliably** if you:
+- Treat `.md` as a **declarative workflow DSL** (tiny, consistent schema).
+- Standardize **extractor outputs** and **mappings**.
+- Enforce **guardrails** (dry-run, allowlists, PRs).
+- Persist **run-state** and **artifacts** for transparency and resume.
+
+If you want, I can package these into a starter repository layout with the four workflows and stubs for the toolbox/packs so you can drop it next to your workspace and start iterating.
+```
