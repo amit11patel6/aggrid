@@ -1,0 +1,16 @@
+:root{
+  --width: 360px;
+}
+
+body{font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; margin:20px}
+.app{max-width:var(--width)}
+.combobox-root{width:100%; max-width:var(--width)}
+.combobox-input-row{display:flex; gap:6px; align-items:center}
+.combobox-input{flex:1; padding:8px 10px; font-size:14px}
+.combobox-toggle{padding:8px 10px}
+.combobox-menu{position:relative; width:100%; max-height:240px; border:1px solid #ddd; border-radius:4px; margin-top:8px; overflow:auto}
+.combobox-item{cursor:pointer}
+.combobox-item.highlighted{background:#e6f7ff}
+.combobox-empty{padding:8px}
+
+h1{font-size:18px}
