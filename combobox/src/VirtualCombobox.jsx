@@ -29,6 +29,14 @@ export default function VirtualCombobox({
   itemToString = (i) => (i == null ? '' : String(i)),
   maxMenuHeight = 240,
   maxVisiblePills = 1, // number of pills to show before collapsing into a +N summary. 0 = only +N
+  // filterBy: string | string[] | function(item) => string
+  filterBy = null,
+  // render option in the dropdown: (item) => ReactNode
+  renderOption = null,
+  // render pill content for selected items: (item) => ReactNode
+  renderPill = null,
+  // key extractor for list items/pills
+  keyExtractor = null,
 }) {
   const allItems = useMemo(() => items, [items])
 
@@ -50,6 +58,25 @@ export default function VirtualCombobox({
 
   const [inputItems, setInputItems] = useState(allItems)
   useEffect(() => setInputItems(allItems), [allItems])
+
+  // key extractor and searchable string helpers for object items
+  const keyFor = useCallback((item) => {
+    if (typeof keyExtractor === 'function') return keyExtractor(item)
+    if (item && typeof item === 'object' && (item.id !== undefined)) return String(item.id)
+    return itemToString(item)
+  }, [keyExtractor, itemToString])
+
+  const searchableStringFor = useCallback((item) => {
+    if (typeof filterBy === 'function') return String(filterBy(item) ?? '')
+    if (typeof filterBy === 'string') {
+      const v = (item && item[filterBy] !== undefined) ? item[filterBy] : itemToString(item)
+      return String(v ?? '')
+    }
+    if (Array.isArray(filterBy)) {
+      return filterBy.map(k => (item && item[k] !== undefined) ? item[k] : '').join(' ')
+    }
+    return itemToString(item)
+  }, [filterBy, itemToString])
 
   const parentRef = useRef(null)
   const inputRef = useRef(null)
@@ -84,7 +111,7 @@ export default function VirtualCombobox({
       const term = (inputValue || '').toLowerCase()
       filterTimerRef.current = setTimeout(() => {
         const filtered = allItems.filter(i =>
-          itemToString(i).toLowerCase().includes(term)
+          searchableStringFor(i).toLowerCase().includes(term)
         )
         setInputItems(filtered)
         setHighlightedIndex(0)
@@ -155,22 +182,6 @@ export default function VirtualCombobox({
     if (inputRef.current && inputRef.current.focus) inputRef.current.focus()
   }, [toggleSelected, setInputValue, setInputItems, allItems, setHighlightedIndex])
 
-  // compose input props to add keyboard handling (Space toggles highlighted item in multi-select)
-  const rawInputProps = getInputProps({ placeholder })
-  const _originalOnKeyDown = rawInputProps.onKeyDown
-  rawInputProps.onKeyDown = (e) => {
-    // when menu is open and multiSelect, use Space to toggle the highlighted item
-    const isSpace = e.key === ' ' || e.key === 'Spacebar' || e.code === 'Space'
-    if (multiSelect && isOpen && isSpace) {
-      e.preventDefault()
-      const item = inputItems[highlightedIndex]
-      if (item) {
-        toggleSelected(item)
-      }
-    }
-    if (typeof _originalOnKeyDown === 'function') _originalOnKeyDown(e)
-  }
-
   const rowVirtualizer = useVirtualizer({
     count: inputItems.length,
     getScrollElement: () => parentRef.current,
@@ -180,6 +191,9 @@ export default function VirtualCombobox({
 
   const virtualItems = rowVirtualizer.getVirtualItems()
   const totalSize = rowVirtualizer.getTotalSize()
+
+  // input props from Downshift
+  const rawInputProps = getInputProps({ placeholder })
 
   // memoize startAdornment rendering to avoid recreating on each render
   const startAdornment = useMemo(() => {
@@ -210,8 +224,8 @@ export default function VirtualCombobox({
       return (
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
           {current.map(s => (
-            <Pill key={itemToString(s)} onClick={() => toggleSelected(s)}>
-              {itemToString(s)} <CloseIcon style={{ marginLeft: 6 }} />
+            <Pill key={keyFor(s)} onClick={() => toggleSelected(s)}>
+              {renderPill ? renderPill(s) : itemToString(s)} <CloseIcon style={{ marginLeft: 6 }} />
             </Pill>
           ))}
         </div>
@@ -225,8 +239,8 @@ export default function VirtualCombobox({
     return (
       <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'nowrap' }}>
         {visible.map(s => (
-          <Pill key={itemToString(s)} onClick={() => toggleSelected(s)}>
-            {itemToString(s)} <CloseIcon style={{ marginLeft: 6 }} />
+          <Pill key={keyFor(s)} onClick={() => toggleSelected(s)}>
+            {renderPill ? renderPill(s) : itemToString(s)} <CloseIcon style={{ marginLeft: 6 }} />
           </Pill>
         ))}
         {remainingCount > 0 && (
@@ -241,7 +255,7 @@ export default function VirtualCombobox({
         )}
       </div>
     )
-  }, [multiSelect, selectedItems, itemToString, toggleSelected, maxVisiblePills])
+  }, [multiSelect, selectedItems, itemToString, toggleSelected, maxVisiblePills, renderPill, keyFor])
 
   return (
     <div className="combobox-root">
@@ -311,7 +325,7 @@ export default function VirtualCombobox({
                     onClick={e => e.stopPropagation()}
                   />
                 )}
-                <div style={{ flex: 1 }}>{itemToString(item)}</div>
+                <div style={{ flex: 1 }}>{renderOption ? renderOption(item) : itemToString(item)}</div>
               </div>
             )
           })}
